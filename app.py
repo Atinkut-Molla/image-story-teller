@@ -270,7 +270,7 @@ def get_story_model(api_key: str):
     try:
         genai.configure(api_key=api_key)
         # Use the latest stable model
-        model_name = "gemini-1.5-flash-latest"
+        model_name = "gemini-flash-latest"
         
         model = genai.GenerativeModel(model_name)
         
