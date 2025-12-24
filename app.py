@@ -1,4 +1,5 @@
 import io
+import os
 from typing import Optional
 
 import streamlit as st
@@ -102,7 +103,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ------------- Sidebar: API configuration (same deployment) -------------
+# ------------- Sidebar: API configuration -------------
 with st.sidebar:
     st.header("Story Engine Settings")
     st.caption(
@@ -110,42 +111,89 @@ with st.sidebar:
         "If the shared key is unavailable, you may provide your own in "
         "`.streamlit/secrets.toml` as `GEMINI_API_KEY`."
     )
+    
+    # Allow manual API key input in sidebar for debugging
+    api_key_input = st.text_input("Enter Gemini API Key (optional)", type="password", help="Leave empty to use secrets")
+    if api_key_input:
+        api_key = api_key_input
+        st.success("Using manually entered API key")
+    else:
+        # Try to get API key from Streamlit secrets
+        try:
+            api_key = st.secrets["GEMINI_API_KEY"]
+            st.success("Using API key from secrets")
+        except Exception as e:
+            api_key = None
+            st.error(f"API key not found in secrets: {e}")
 
 # ------------- Gemini Setup -------------
-# Assumes you keep the same deployment style you already use:
-# The API key must come from Streamlit secrets or environment.
-api_key: Optional[str] = st.secrets.get("GEMINI_API_KEY", None)
-
-if api_key:
-    genai.configure(api_key=api_key)
-
-
 @st.cache_resource(show_spinner=False)
-def get_story_model():
-    # Use the same model you used before; typically "gemini-1.5-flash" or similar.
-    return genai.GenerativeModel("gemini-1.5-flash")
+def get_story_model(api_key: str):
+    """Initialize Gemini model with API key"""
+    if not api_key:
+        return None
+    
+    try:
+        genai.configure(api_key=api_key)
+        # Use the latest stable model - you can change this based on your needs
+        model_name = "gemini-1.5-flash"
+        # Alternative models to try if the above fails:
+        # model_name = "gemini-1.0-pro"
+        # model_name = "gemini-pro"
+        
+        model = genai.GenerativeModel(model_name)
+        
+        # Test the model configuration
+        st.sidebar.info(f"Using model: {model_name}")
+        return model
+    except Exception as e:
+        st.sidebar.error(f"Failed to initialize model: {str(e)}")
+        return None
 
 
 def generate_story_from_image(
     image_bytes: bytes,
     language: str,
+    api_key: str
 ) -> str:
     """Call Gemini to generate a story given an image and target language."""
-    model = get_story_model()
-
-    prompt = (
-        "You are an imaginative storyteller. "
-        "Look at the image and write a short, vivid narrative (about 3–5 paragraphs). "
-        f"Write the story entirely in {language}. "
-        "Do not describe the task, only tell the story."
-    )
-
-    img = Image.open(io.BytesIO(image_bytes))
-    response = model.generate_content(
-        [prompt, img],
-        request_options={"timeout": 120},
-    )
-    return response.text.strip()
+    try:
+        model = get_story_model(api_key)
+        if not model:
+            return "Error: Model not initialized. Please check your API key."
+        
+        prompt = (
+            "You are an imaginative storyteller. "
+            "Look at the image and write a short, vivid narrative (about 3–5 paragraphs). "
+            f"Write the story entirely in {language}. "
+            "Do not describe the task, only tell the story."
+        )
+        
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Generate content with error handling
+        try:
+            response = model.generate_content(
+                [prompt, img],
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.8,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=1024,
+                )
+            )
+            
+            # Check if response has valid text
+            if response and hasattr(response, 'text'):
+                return response.text.strip()
+            else:
+                return "Error: Empty response from AI model."
+                
+        except Exception as gen_error:
+            return f"Error generating story: {str(gen_error)}"
+            
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 
 # ------------- Layout: Left / Right panels -------------
@@ -174,7 +222,12 @@ with left_col:
 
     if uploaded_file is not None:
         st.markdown("#### Preview")
-        st.image(uploaded_file, use_column_width=True, caption="Story image")
+        # Check file size
+        file_size = len(uploaded_file.getvalue()) / (1024 * 1024)  # MB
+        if file_size > 10:
+            st.error("File size exceeds 10 MB limit. Please upload a smaller image.")
+        else:
+            st.image(uploaded_file, use_column_width=True, caption=f"Story image ({file_size:.2f} MB)")
 
 # --- Right: Generated Story with language tabs ---
 with right_col:
@@ -190,7 +243,7 @@ with right_col:
         unsafe_allow_html=True,
     )
 
-    # Language selection styled as pills, matching top mockup
+    # Language selection
     lang_tabs = ["English", "Amharic", "Chinese"]
     lang_map = {
         "English": "English",
@@ -217,8 +270,7 @@ with right_col:
 
     if not api_key:
         st.warning(
-            "No `GEMINI_API_KEY` found in Streamlit secrets. "
-            "Add it before generating stories."
+            "No Gemini API Key found. Please add it in the sidebar or in `.streamlit/secrets.toml` file."
         )
 
     if generate_clicked and uploaded_file is not None and api_key:
@@ -227,10 +279,26 @@ with right_col:
             story_text = generate_story_from_image(
                 image_bytes=image_bytes,
                 language=lang_map[selected_lang],
+                api_key=api_key
             )
+        
+        # Display the story with proper formatting
         story_placeholder.markdown(
-            f"##### Your Story in {selected_lang}\n\n{story_text}"
+            f"""
+<div class="section-card" style="margin-top: 1rem;">
+    <h4 style="margin-top:0; color:#4f46e5;">Your Story in {selected_lang}</h4>
+    <div style="line-height: 1.6; font-size: 0.95rem;">
+        {story_text}
+    </div>
+</div>
+""",
+            unsafe_allow_html=True,
         )
+        
+        # Add copy to clipboard button
+        if not story_text.startswith("Error"):
+            st.code(story_text, language="text")
+            
     else:
         story_placeholder.markdown(
             """
